@@ -1,0 +1,16 @@
+name: codegos-telemetry
+version: "0.2.0"
+description: Passive metadata-only turn, tool, API, and stream telemetry for Codegos benchmarks.
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - pre_tool_call
+  - post_tool_call
+  - post_llm_call
+  - on_session_end
+  - pre_api_request
+  - post_api_request
+  - api_request_error
+  - on_stream_start
+  - on_stream_delta
+  - on_stream_end

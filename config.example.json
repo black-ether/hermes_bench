@@ -1,0 +1,7 @@
+{
+  "sessions_dir": "%LOCALAPPDATA%/hermes/bench/sessions",
+  "telemetry_file": "%LOCALAPPDATA%/hermes/experiments/events.jsonl",
+  "reports_dir": "%LOCALAPPDATA%/hermes/bench/reports",
+  "session_pattern": "*.jsonl",
+  "recursive": false
+}

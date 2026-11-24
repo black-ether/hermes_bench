@@ -1,0 +1,7 @@
+{
+  "sessions_dir": ".",
+  "telemetry_file": "events.jsonl",
+  "reports_dir": "../reports",
+  "session_pattern": "session.jsonl",
+  "recursive": false
+}

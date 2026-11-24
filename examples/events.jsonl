@@ -1,0 +1,4 @@
+{"ts":"2026-11-22T02:44:01.223Z","event":"turn.started","session_id":"local-example-001","model":"qwen/qwen4-max:free"}
+{"ts":"2026-11-22T02:44:02.000Z","event":"tool.started","session_id":"local-example-001","tool":"search_files"}
+{"ts":"2026-11-22T02:44:18.601Z","event":"tool.completed","session_id":"local-example-001","tool":"search_files","duration_ms":16601,"result_bytes":10387,"result_chars":10120,"status":"unknown"}
+{"ts":"2026-11-22T02:47:20.900Z","event":"turn.response","session_id":"local-example-001","model":"qwen/qwen4-max:free","response_chars":520}

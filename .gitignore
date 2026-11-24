@@ -1,0 +1,10 @@
+# Generated reports (private session transcripts)
+reports/
+
+# Build output
+/hermes-bench.exe
+/hermes-bench
+*.exe
+
+# Incremental sync state
+/.hermes-bench-sync.json
