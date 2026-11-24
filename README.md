@@ -26,14 +26,45 @@ An existing `%LOCALAPPDATA%\hermes-bench\config.json` is reused. If this is the 
 
 | Command | Action |
 |---|---|
-| `go run .` / `go run . list` | List locally exported sessions |
+| `go run .` / `go run . list` | List locally exported sessions (default when no command is given) |
 | `go run . sync` | Export new or changed telemetry-attributed sessions only |
 | `go run . sync --all` | Full Hermes export, including sessions without telemetry |
 | `go run . report latest` | Print and save a report for the latest exported session |
 | `go run . report 1` | Print and save a report by listing index |
 | `go run . run` | Incremental sync followed by `report latest` |
+| `go run . init` | Create the separate configuration file (refuses to overwrite) |
+| `go run . help` | Print the full usage text (`-h`, `--help` also work) |
+
+`--config <path>` selects a different configuration file and may appear anywhere on the command line (`--config=path` also works). `report` also accepts `--markdown` / `-m`; the full Markdown report is written by default, so those flags are only needed for explicitness.
 
 Compiled versions use `hermes-bench.exe` in place of `go run .`.
+
+## Configuration file
+
+Defaults live at `%LOCALAPPDATA%\hermes-bench\config.json`; without `LOCALAPPDATA` the fallbacks are `$XDG_CONFIG_HOME/hermes-bench/config.json`, then `~/.config/hermes-bench/config.json`. `HERMES_HOME` replaces the `hermes` base directory for the session and telemetry defaults.
+
+| Key | Meaning | Default |
+|---|---|---|
+| `sessions_dir` | Redacted session exports and the `.hermes-bench-sync.json` progress cursor | `<base>/bench/sessions` |
+| `telemetry_file` | Telemetry plugin JSONL log | `<base>/experiments/events.jsonl` |
+| `reports_dir` | Markdown output directory | Beside the binary (`./reports` for `go run .`) |
+| `session_pattern` | Glob matched against session filenames | `*.jsonl` |
+| `recursive` | Search `sessions_dir` recursively instead of one level | `false` |
+
+- Relative paths resolve against the configuration file's directory.
+- `%VAR%` (Windows) and `$VAR` expand; a leading `~` expands to the user home directory.
+- `init` writes already-expanded absolute paths and never overwrites an existing file.
+- `config.example.json` is a template; `examples/config.json` is a working local example pointed at the bundled sample data.
+
+## Telemetry source: codegos-telemetry
+
+Reports pair a redacted Hermes session export with metadata logged by the bundled `codegos-telemetry` plugin (v0.2.0). The reporter reads counters only; it never sees prompts, tool arguments or tool bodies.
+
+- Default log location: `$HERMES_HOME/experiments/events.jsonl`, or `%LOCALAPPDATA%\hermes\experiments\events.jsonl` on native Windows when `HERMES_HOME` is unset. `CODEGOS_TELEMETRY_DIR` overrides the directory.
+- Install by replacing the installed plugin's `__init__.py` and `plugin.yaml` with the copies in `codegos-telemetry/`, then restarting the Hermes process/gateway. Keep a backup first. `codegos-telemetry/README.md` lists every event, per-event fields, and the opt-in `plugins: stream_reasoning_deltas: true` setting.
+- Without a telemetry log, `list` and `report` still work from existing exports (telemetry columns show `none` and the report carries explicit caveats), but `sync` and `run` stop with `no session-attributed telemetry found; run a Hermes task or use sync --all`.
+
+The reporter consumes these keys from each JSONL record (aliases accepted where noted): `ts`, `event`, `session_id` / `task_id` / `conversation_id`, `tool_call_id`, `tool`, `duration_ms` / `elapsed_ms`, `result_bytes` / `output_bytes`, `result_chars` / `output_chars`, `status` / `outcome`, `error_type`, `provider`, `model`, `api_request_id`, `api_duration`, `finish_reason`, `usage_prompt_tokens` / `usage_input_tokens`, `usage_completion_tokens` / `usage_output_tokens`, `usage_cache_read_tokens`, `usage_cache_write_tokens`, `usage_reasoning_tokens`, `usage_total_tokens`, and the stream fields `observed_duration_ms`, `max_delta_gap_ms`, `text_deltas`, `reasoning_deltas`, `first_text_ms`, `last_text_ms`, `first_reasoning_ms`, `last_reasoning_ms`. Field names, types and which event carries them are documented in `codegos-telemetry/README.md`.
 
 ## Detailed Markdown retained from v0.6
 
@@ -70,7 +101,7 @@ Full report: reports/Inspect project configuration loading process.md
 
 ### What the token numbers mean
 
-- **Prompt and final-answer tokens:** very rough *text-only estimates* made from persisted session `content`. ASCII characters are divided by four (rounded up); CJK script characters are counted individually. **No timestamps, JSON keys, tool payloads, or reasoning sidecars** are included in these two estimates. The estimated final-answer text count is **not** the provider's entire completion-token count.
+- **Prompt and final-answer tokens:** very rough *text-only estimates* made from persisted session `content`. Characters in Han, Hiragana, Katakana and Hangul script count as one token each; every other character, including non-CJK non-ASCII such as emoji or Cyrillic, is grouped at roughly four characters per token (rounded up). **No timestamps, JSON keys, tool payloads, or reasoning sidecars** are included in these two estimates. The estimated final-answer text count is **not** the provider's entire completion-token count.
 - **Prompt x API requests:** an estimated count of prompt-token *occurrences* assuming each API request included the original prompt unchanged. This is not verified against provider request payloads. Sessions with more than one active user message do not get this estimate.
 - **Background workload:** `sum(provider_input_tokens + provider_output_tokens) - (estimated_prompt_tokens * completed_requests) - estimated_final_answer_tokens`. It includes cached/repeated context, system instructions, tool results, intermediate generated output and reasoning; it is **not** the number of reasoning tokens or distinct tokens. Shown only when every API request provides counters that reconcile with the session totals, and the session has a single user prompt and saved final answer.
 - **Tool-result token estimates:** `result_chars / 4`, rounded up, from the telemetry plugin. These are not exact model-tokenizer counts, and they are **not additive** to cumulative API input because context may be reused. When character counts are unavailable, display measured result KB instead of inventing tokens.
@@ -84,7 +115,7 @@ The detailed Markdown preserves original provider counters, a per-request table,
 
 Latest exported session: `reports/<task title>.md`, with Windows-invalid filename characters replaced. Task title capitalization and spaces are preserved. A same-session report can be regenerated without changing its name.
 
-Every generated report is also archived at `reports/history/<task title> (<session hash>).md`. Different sessions with identical task titles therefore retain separate complete reports. Reporting an older session by index creates/updates its history file **without changing** the latest title-only report. A later `run` or `report latest` updates the title-only file for its task.
+Every generated report is also archived at `reports/history/<task title> (<session hash>).md`, where `<session hash>` is the first 6 bytes of the SHA-256 of the session ID (12 lowercase hex characters). Different sessions with identical task titles therefore retain separate complete reports. Reporting an older session by index creates/updates its history file **without changing** the latest title-only report. A later `run` or `report latest` updates the title-only file for its task.
 
 Custom `reports_dir` settings are honored; all paths above are relative to that directory.
 
@@ -107,3 +138,5 @@ The reporter assumes no manual truncation/replacement of `events.jsonl`; if you 
 One fresh Hermes session per experimental run is recommended. The reporter still supports multi-turn conversations but totals are session-wide; multiple user messages trigger a warning. It supports API and stream timing fields including `first_reasoning_ms`, `last_reasoning_ms`, `first_text_ms`, `last_text_ms`. Old telemetry lacking last-chunk values remains readable.
 
 Hermes' `--redact` export masks secrets but may preserve private task text. Do not share session exports without reviewing them.
+
+Rendered timestamps use RFC 3339 in the machine's local UTC offset; they are not normalized to UTC, so the same export reports different wall-clock strings on machines in different zones.
