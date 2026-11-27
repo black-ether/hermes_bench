@@ -19,6 +19,26 @@ Get-Content "$exp\experiments\hermes-context-prep.jsonl" -Tail 5
 Get-Content "$exp\experiments\events.jsonl" -Tail 10
 ```
 
+Use an ordinary PowerShell process without a manual `HERMES_HOME` override for standard `hermes` and `hermes desktop`. To undo a manual override in the current tab, run `$env:HERMES_HOME = $null`. A child pane can inherit a manually activated shell's environment. The experimental launchers select the isolated home on every invocation and restore the caller's previous values.
+
+Resume an exact ID from `hermes-exp sessions list` with `hermes-exp --resume <session-id>`. The separate top-level `resume` subcommand lifts an emergency stop. An explicit ID also avoids the recent-session and terminal breadcrumb rules used by bare `--continue`.
+
+Launch experimental Desktop with `hermes-exp desktop --skip-build --cwd "$env:USERPROFILE\scripts\task-reference"`. Use `--skip-build` when the existing unpacked app is installed. The launcher gives experimental Electron its own user-data directory under the experimental home. This isolates its single-instance lock and saved connections. In the experimental window, select **This device / default** to inspect that local store.
+
+To check the effective shell override and latest experimental injection:
+
+```powershell
+Get-Item Env:HERMES_HOME -ErrorAction SilentlyContinue
+$exp = "$env:USERPROFILE\scripts\context-prep\.venv\hermes-windows-profile"
+Get-Item "$exp\state.db", "$exp\experiments\events.jsonl"
+hermes-exp plugins list --plain --no-bundled
+Get-Content "$exp\experiments\hermes-context-prep.jsonl" -Tail 25 |
+    ForEach-Object { $_ | ConvertFrom-Json } |
+    Where-Object status |
+    Select-Object -Last 1 ts, session_id, status, injected_chars, hook_ms
+bench-exp list
+```
+
 ## Gateway lifecycle
 
 The experimental configuration sets `gateway.standalone: true`. For a persistent interactive gateway, run `hermes-exp gateway run` in a dedicated terminal and leave it open. To reload plugins or change child environment settings, stop that experimental foreground process with Ctrl+C, then run the same command again. Use `hermes-exp gateway status` to inspect it. The standard gateway has a different home. A gateway already running before a configuration change retains its launch environment. No system service was installed. At setup the isolated gateway recorded a stopped state and its PID was absent.

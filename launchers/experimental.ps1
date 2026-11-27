@@ -23,6 +23,10 @@ $settings = @{
     CODEGOS_TELEMETRY_DIR = $logs
     PATH = "$bin;$env:PATH"
 }
+if ($Command -eq 'hermes' -and $CommandArgs.Count -gt 0 -and $CommandArgs[0] -in @('desktop', 'gui')) {
+    # Electron scopes its single-instance lock and remembered connections to this directory.
+    $settings.HERMES_DESKTOP_USER_DATA_DIR = Join-Path $experiment 'desktop-user-data'
+}
 $prior = @{}
 try {
     foreach ($key in $settings.Keys) {
