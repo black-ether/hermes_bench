@@ -28,6 +28,7 @@ An existing `%LOCALAPPDATA%\hermes-bench\config.json` is reused. If this is the 
 |---|---|
 | `go run .` / `go run . list` | List locally exported sessions (default when no command is given) |
 | `go run . sync` | Export new or changed telemetry-attributed sessions only |
+| `go run . sync --recheck` | Recheck every ID in saved exports or session-attributed telemetry against the selected Hermes profile |
 | `go run . sync --all` | Full Hermes export, including sessions without telemetry |
 | `go run . report latest` | Print and save a report for the latest exported session |
 | `go run . report 1` | Print and save a report by listing index |
@@ -49,6 +50,7 @@ Defaults live at `%LOCALAPPDATA%\hermes-bench\config.json`; without `LOCALAPPDAT
 | `telemetry_file` | Telemetry plugin JSONL log | `<base>/experiments/events.jsonl` |
 | `reports_dir` | Markdown output directory | Beside the binary (`./reports` for `go run .`) |
 | `session_pattern` | Glob matched against session filenames | `*.jsonl` |
+| `profile` | Optional Hermes profile passed to the export CLI. If omitted, Hermes selects its usual profile. | unset |
 | `recursive` | Search `sessions_dir` recursively instead of one level | `false` |
 
 - Relative paths resolve against the configuration file's directory.
@@ -125,7 +127,13 @@ On its first incremental sync, v0.6 **adopts the existing telemetry log as a bas
 
 It does not require `/status` or copying session IDs. It does not delete Hermes sessions or modify `events.jsonl`. A previously deleted Hermes session cannot be exported retrospectively, although telemetry remains. If a run has no session-attributed telemetry, it cannot be discovered incrementally; `sync --all` is the fallback.
 
-The reporter assumes no manual truncation/replacement of `events.jsonl`; if you rotate or delete the file, reset the incremental state file or run `sync --all`. Repeated runs inside the same session are exported again only if additional attributed events were recorded. Source snapshots and the Hermes database remain local.
+An explicit Hermes “No session” result records the ID as unavailable in the selected profile. Manual deletion and a session owned by another profile can give the same result. The old snapshot remains reportable. Other export errors stop sync and retain the previous cursor for that ID.
+
+The cursor accepts the old `counts` map automatically. Earlier versions used this field for both snapshots and adopted history. Old entries start with unknown availability. New cursors keep unexported bootstrap counts in `baseline`; validated incremental exports update `counts`. Each new `availability` entry records the profile context, check time, observed event count and missing status. An unchanged missing ID becomes eligible again after 24 hours. Changed counts or a different profile context trigger an earlier retry. Use `sync --recheck` to check immediately, including previously saved sessions with no telemetry. For experiments with shared telemetry, select the owner via the configuration's `profile` field. Separate export directories are appropriate when profile IDs overlap.
+
+`list` numbers saved exports for `report`. Telemetry-only IDs appear separately. Availability describes the last export check. The listing counts all matched events, tool events and recorded tool completions separately. A deficit of API outcome records is flagged as incomplete. Event counts alone cannot establish complete timing or provider usage. The detailed report identifies unavailable measurements. `run` continues to report the newest saved export, which may be historical.
+
+Incremental change detection assumes an append-only telemetry log. Replacing a log with different events having the same counts requires an explicit recheck. Full sync preserves the previous bulk snapshot under a content-derived filename before replacing it. This requires hard-link support in the export directory. Full sync leaves the incremental cursor untouched.
 
 ## Reports location
 

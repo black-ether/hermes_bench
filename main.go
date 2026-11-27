@@ -20,6 +20,8 @@ import (
 )
 
 type Config struct {
+	Profile        string `json:"profile,omitempty"`
+	recheck        bool
 	SessionsDir    string `json:"sessions_dir"`
 	TelemetryFile  string `json:"telemetry_file"`
 	ReportsDir     string `json:"reports_dir"`
@@ -28,27 +30,28 @@ type Config struct {
 }
 
 type SessionCandidate struct {
-	Path              string
-	FileModTime       time.Time
-	ID                string
-	Title             string
-	Model             string
-	Provider          string
-	Source            string
-	CWD               string
-	Started           *time.Time
-	Ended             *time.Time
-	Messages          int
-	ActiveMessages    int
-	ArchivedMessages  int
-	ToolCalls         int
-	ActiveToolCalls   int
-	ArchivedToolCalls int
-	InputTokens       *int64
-	OutputTokens      *int64
-	TelemetryEvents   int
-	TelemetryTools    int
-	Raw               map[string]any
+	Path                string
+	FileModTime         time.Time
+	ID                  string
+	Title               string
+	Model               string
+	Provider            string
+	Source              string
+	CWD                 string
+	Started             *time.Time
+	Ended               *time.Time
+	Messages            int
+	ActiveMessages      int
+	ArchivedMessages    int
+	ToolCalls           int
+	ActiveToolCalls     int
+	ArchivedToolCalls   int
+	InputTokens         *int64
+	OutputTokens        *int64
+	TelemetryEvents     int
+	TelemetryToolEvents int
+	TelemetryTools      int
+	Raw                 map[string]any
 }
 
 type ToolStat struct {
@@ -241,9 +244,14 @@ func main() {
 		for _, arg := range args {
 			if arg == "--all" {
 				full = true
+			} else if arg == "--recheck" {
+				cfg.recheck = true
 			} else {
 				fatal(fmt.Errorf("unknown sync option: %s", arg))
 			}
+		}
+		if full && cfg.recheck {
+			fatal(errors.New("choose either --all or --recheck"))
 		}
 		if err := syncSessions(cfg, full); err != nil {
 			fatal(err)
@@ -323,6 +331,7 @@ Usage:
                                 Save the full Markdown report (default for report)
   hermes-bench report latest    Report most recent exported session
   hermes-bench sync             Incrementally export new/changed telemetry sessions
+  hermes-bench sync --recheck   Recheck all telemetry sessions in the selected profile
   hermes-bench sync --all       Export all stored Hermes sessions (slower)
   hermes-bench run              Incremental sync + report latest, in one command
   hermes-bench init             Create the separate configuration file
@@ -415,8 +424,16 @@ func defaultReportsDir() string {
 // Hermes is the source of truth for exports; this tool never edits state.db.
 // The initial incremental sync bootstraps old IDs from the existing exports and
 // exports the latest observed session, avoiding a costly historical replay.
+type availability struct {
+	Missing  bool      `json:"missing,omitempty"`
+	Observed int       `json:"observed"`
+	Scope    string    `json:"scope"`
+	Checked  time.Time `json:"checked"`
+}
 type syncState struct {
-	Counts map[string]int `json:"counts"`
+	Baseline     map[string]int          `json:"baseline,omitempty"`
+	Availability map[string]availability `json:"availability,omitempty"`
+	Counts       map[string]int          `json:"counts"`
 }
 
 type telemetrySession struct {
@@ -498,20 +515,31 @@ func syncExportPath(dir, id string) string {
 	return filepath.Join(dir, "hermes-bench-session-"+hex.EncodeToString(hash[:12])+".jsonl")
 }
 
-func exportHermesSession(id, path string) (bool, error) {
+func hermesExport(cfg Config, args ...string) *exec.Cmd {
+	if cfg.Profile != "" {
+		args = append([]string{"--profile", cfg.Profile}, args...)
+	}
+	return exec.Command("hermes", args...)
+}
+
+func exportHermesSession(cfg Config, id, path string) (bool, error) {
 	tmp := path + ".tmp"
 	_ = os.Remove(tmp)
-	cmd := exec.Command("hermes", "sessions", "export", tmp, "--session-id", id, "--redact")
+	cmd := hermesExport(cfg, "sessions", "export", tmp, "--session-id", id, "--redact")
 	result, err := cmd.CombinedOutput()
 	if err != nil {
 		_ = os.Remove(tmp)
+		var exit *exec.ExitError
+		expected := fmt.Sprintf("No session '%s'. Run: hermes sessions list to find the id.", id)
+		if errors.As(err, &exit) && exit.ExitCode() == 1 && strings.TrimSpace(string(result)) == expected {
+			return false, nil
+		}
 		return false, fmt.Errorf("Hermes export %s failed: %w: %s", shortID(id), err, strings.TrimSpace(string(result)))
 	}
 	objects, bad, readErr := readJSONLObjects(tmp)
 	if readErr != nil || bad > 0 || len(objects) != 1 || getString(unwrapSession(objects[0]), "id", "session_id", "sessionId") != id {
 		_ = os.Remove(tmp)
-		// Missing/deleted Hermes sessions can return success with no export.
-		return false, nil
+		return false, fmt.Errorf("invalid Hermes export for %s (read error %v, malformed lines %d, records %d)", id, readErr, bad, len(objects))
 	}
 	// Windows os.Rename will not replace an existing destination.
 	// Retain the previous export if new data could not be validated.
@@ -542,23 +570,24 @@ func syncSessions(cfg Config, full bool) error {
 	if full {
 		out := filepath.Join(cfg.SessionsDir, "hermes-bench-synced.jsonl")
 		tmp := out + ".tmp"
-		cmd := exec.Command("hermes", "sessions", "export", tmp, "--redact")
+		cmd := hermesExport(cfg, "sessions", "export", tmp, "--redact")
 		result, err := cmd.CombinedOutput()
 		if err != nil {
 			_ = os.Remove(tmp)
 			return fmt.Errorf("Hermes full export failed: %w\n%s", err, strings.TrimSpace(string(result)))
 		}
 		if _, err := os.Stat(out); err == nil {
-			backup := out + ".bak"
-			_ = os.Remove(backup)
-			if err := os.Rename(out, backup); err != nil {
+			digest, err := fileSHA256(out)
+			if err != nil {
 				return err
+			}
+			archive := filepath.Join(cfg.SessionsDir, "hermes-bench-history-"+digest+".jsonl")
+			if err := os.Link(out, archive); err != nil && !os.IsExist(err) {
+				return fmt.Errorf("preserve previous full export: %w", err)
 			}
 			if err := os.Rename(tmp, out); err != nil {
-				_ = os.Rename(backup, out)
 				return err
 			}
-			_ = os.Remove(backup)
 		} else if err := os.Rename(tmp, out); err != nil {
 			return err
 		}
@@ -573,6 +602,17 @@ func syncSessions(cfg Config, full bool) error {
 	if err != nil {
 		return err
 	}
+	if cfg.recheck {
+		archives, _, err := discoverSessions(cfg)
+		if err != nil {
+			return err
+		}
+		for _, archive := range archives {
+			if _, ok := observed[archive.ID]; !ok {
+				observed[archive.ID] = telemetrySession{ID: archive.ID}
+			}
+		}
+	}
 	if len(observed) == 0 {
 		return errors.New("no session-attributed telemetry found; run a Hermes task or use sync --all")
 	}
@@ -580,6 +620,32 @@ func syncSessions(cfg Config, full bool) error {
 	if err != nil {
 		return fmt.Errorf("read sync state: %w", err)
 	}
+	return incrementalSync(cfg, observed, state, exists, exportHermesSession)
+}
+
+func syncScope(cfg Config) string {
+	profile := cfg.Profile
+	if profile == "" {
+		profile = os.Getenv("HERMES_PROFILE_NAME")
+		if profile == "" {
+			profile = os.Getenv("HERMES_PROFILE")
+		}
+		if profile == "" && os.Getenv("HERMES_HOME") == "" {
+			base := filepath.Dir(filepath.Dir(defaultConfig().SessionsDir))
+			if data, err := os.ReadFile(filepath.Join(base, "active_profile")); err == nil {
+				profile = strings.TrimSpace(string(data))
+			}
+		}
+	}
+	return fmt.Sprintf("home=%s profile=%s", os.Getenv("HERMES_HOME"), profile)
+}
+
+func incrementalSync(cfg Config, observed map[string]telemetrySession, state syncState, exists bool, export func(Config, string, string) (bool, error)) error {
+	scope := syncScope(cfg)
+	if state.Availability == nil {
+		state.Availability = map[string]availability{}
+	}
+	cached := 0
 	ordered := make([]telemetrySession, 0, len(observed))
 	for _, session := range observed {
 		ordered = append(ordered, session)
@@ -588,40 +654,54 @@ func syncSessions(cfg Config, full bool) error {
 	if !exists {
 		// Adopt the historical log as baseline; only the newest run must be
 		// exported now. Use sync --all to import all historical sessions.
+		state.Baseline = map[string]int{}
 		for _, session := range ordered {
-			state.Counts[session.ID] = session.Count
+			state.Baseline[session.ID] = session.Count
 		}
 		fmt.Println("Initialized incremental cursor from existing telemetry; historical sessions unchanged (sync --all imports them).")
 	}
 	updated, missing := 0, 0
 	for _, session := range ordered {
 		path := syncExportPath(cfg.SessionsDir, session.ID)
-		if exists && state.Counts[session.ID] == session.Count {
+		prev, checked := state.Availability[session.ID]
+		if n, baseline := state.Baseline[session.ID]; exists && baseline && !cfg.recheck && n == session.Count {
 			continue
 		}
-		if !exists && updated > 0 {
+		if !cfg.recheck && checked && prev.Scope == scope && prev.Missing && prev.Observed == session.Count && time.Since(prev.Checked) < 24*time.Hour {
+			cached++
+			continue
+		}
+		if !cfg.recheck && exists && (!checked || (!prev.Missing && prev.Scope == scope)) && state.Counts[session.ID] == session.Count {
+			continue
+		}
+		if !exists && !cfg.recheck && updated > 0 {
 			break
 		}
-		ok, err := exportHermesSession(session.ID, path)
+		ok, err := export(cfg, session.ID, path)
 		if err != nil {
 			return err
 		}
+		delete(state.Baseline, session.ID)
+		state.Availability[session.ID] = availability{Missing: !ok, Observed: session.Count, Scope: scope, Checked: time.Now().UTC()}
 		if ok {
+			state.Counts[session.ID] = session.Count
 			updated++
 			fmt.Println("Synced:", shortID(session.ID))
 		} else {
 			missing++
-			fmt.Println("Skipped absent/deleted session:", shortID(session.ID))
+
+			fmt.Printf("Unavailable in selected Hermes profile: %s (%d observed events)\n", session.ID, session.Count)
 		}
-		state.Counts[session.ID] = session.Count
-		if err := saveSyncState(syncStatePath(cfg), state); err != nil {
-			return err
+		if exists {
+			if err := saveSyncState(syncStatePath(cfg), state); err != nil {
+				return err
+			}
 		}
 	}
 	if err := saveSyncState(syncStatePath(cfg), state); err != nil {
 		return err
 	}
-	fmt.Printf("Incremental sync complete: %d updated, %d unavailable.\n", updated, missing)
+	fmt.Printf("Incremental sync complete: %d updated, %d unavailable, %d previously unavailable skipped.\n", updated, missing, cached)
 	return nil
 }
 
@@ -719,20 +799,19 @@ func expandPath(value string) string {
 }
 
 func listSessions(cfg Config) error {
-	candidates, warnings, err := discoverSessions(cfg)
+	observed, warnings := buildTelemetryIndex(cfg.TelemetryFile)
+	candidates, warnings, err := discoverIndexedSessions(cfg, observed, warnings)
 	if err != nil {
 		return err
 	}
-	if len(candidates) == 0 {
-		fmt.Println("HERMES BENCH — no session exports found")
-		fmt.Println("Session folder:", cfg.SessionsDir)
-		fmt.Println("Export a session with:")
-		fmt.Println("Run: hermes-bench sync")
-		return nil
+	state, _, err := readSyncState(syncStatePath(cfg))
+	if err != nil {
+		return err
 	}
-	fmt.Println("HERMES BENCH — AVAILABLE SESSIONS")
+
+	fmt.Println("HERMES BENCH — SAVED EXPORTS (availability as of last export check)")
 	fmt.Println()
-	fmt.Printf("%-4s %-17s %-42s %-22s %s\n", "#", "DATE", "TITLE", "MODEL", "TELEMETRY")
+	fmt.Printf("%-4s %-17s %-42s %-22s %s\n", "#", "DATE", "TITLE", "MODEL", "TELEMETRY / EXPORT STATUS")
 	fmt.Println(strings.Repeat("─", 112))
 	for i, c := range candidates {
 		date := "unknown"
@@ -745,9 +824,37 @@ func listSessions(cfg Config) error {
 		model := truncate(c.Model, 20)
 		telemetry := "none"
 		if c.TelemetryEvents > 0 {
-			telemetry = fmt.Sprintf("%d events / %d tools", c.TelemetryEvents, c.TelemetryTools)
+			telemetry = fmt.Sprintf("%d events / %d tool events / %d completed", c.TelemetryEvents, c.TelemetryToolEvents, c.TelemetryTools)
 		}
+		status := "availability unchecked"
+		if check, ok := state.Availability[c.ID]; ok && check.Scope == syncScope(cfg) {
+			status = "live at last check"
+			if check.Missing {
+				status = "archived / unavailable at last check"
+			}
+			status += " " + check.Checked.Local().Format("2006-01-02 15:04")
+		}
+		if n, ok := state.Counts[c.ID]; ok && observed[c.ID].SessionEvents > n {
+			status += fmt.Sprintf(" / outdated (%d of %d events at sync)", n, observed[c.ID].SessionEvents)
+		}
+		if gap := observed[c.ID].APIStarts - observed[c.ID].APIOutcomes; gap > 0 {
+			telemetry += fmt.Sprintf(" / incomplete API telemetry (%d missing outcomes)", gap)
+		}
+		telemetry += " | " + status
+		delete(observed, c.ID)
 		fmt.Printf("%-4d %-17s %-42s %-22s %s\n", i+1, date, title, model, telemetry)
+	}
+	var ids []string
+	for id := range observed {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		status := "availability unchecked"
+		if check, ok := state.Availability[id]; ok && check.Scope == syncScope(cfg) && check.Missing {
+			status = "unavailable at last check"
+		}
+		fmt.Printf("No saved export | %s | %d events / %d tool events / %d completed | %s\n", id, observed[id].TotalEvents, observed[id].ToolEvents, observed[id].ToolCompletions, status)
 	}
 	fmt.Printf("\n%d session(s) found | telemetry file: %s\n", len(candidates), fileState(cfg.TelemetryFile))
 	fmt.Println("Generate a report: hermes-bench report <index> (Markdown saved automatically)")
@@ -758,6 +865,10 @@ func listSessions(cfg Config) error {
 }
 
 func discoverSessions(cfg Config) ([]SessionCandidate, []string, error) {
+	index, warnings := buildTelemetryIndex(cfg.TelemetryFile)
+	return discoverIndexedSessions(cfg, index, warnings)
+}
+func discoverIndexedSessions(cfg Config, telemetryIndex map[string]TelemetryIndexEntry, telemetryWarnings []string) ([]SessionCandidate, []string, error) {
 	info, err := os.Stat(cfg.SessionsDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -803,7 +914,6 @@ func discoverSessions(cfg Config) ([]SessionCandidate, []string, error) {
 	}
 	sort.Strings(files)
 
-	telemetryIndex, telemetryWarnings := buildTelemetryIndex(cfg.TelemetryFile)
 	var candidates []SessionCandidate
 	var warnings []string
 	warnings = append(warnings, telemetryWarnings...)
@@ -830,6 +940,7 @@ func discoverSessions(cfg Config) ([]SessionCandidate, []string, error) {
 			}
 			if events, ok := telemetryIndex[candidate.ID]; ok {
 				candidate.TelemetryEvents = events.TotalEvents
+				candidate.TelemetryToolEvents = events.ToolEvents
 				candidate.TelemetryTools = events.ToolCompletions
 			}
 			// If the same session was exported more than once, retain the newest file copy.
@@ -903,7 +1014,7 @@ func candidateFromSession(m map[string]any, path string) SessionCandidate {
 	return c
 }
 
-type TelemetryIndexEntry struct{ TotalEvents, ToolCompletions int }
+type TelemetryIndexEntry struct{ TotalEvents, SessionEvents, ToolEvents, ToolCompletions, APIStarts, APIOutcomes int }
 
 func buildTelemetryIndex(path string) (map[string]TelemetryIndexEntry, []string) {
 	index := map[string]TelemetryIndexEntry{}
@@ -927,16 +1038,28 @@ func buildTelemetryIndex(path string) (map[string]TelemetryIndexEntry, []string)
 	unattributedToolEvents := 0
 	for _, obj := range objects {
 		name := getString(obj, "event", "type")
-		if !strings.HasPrefix(name, "tool.") && name != "pre_tool_call" && name != "post_tool_call" {
-			continue
-		}
+		tool := strings.HasPrefix(name, "tool.") || name == "pre_tool_call" || name == "post_tool_call"
 		key := telemetrySessionKey(obj)
 		if key == "" {
-			unattributedToolEvents++
+			if tool {
+				unattributedToolEvents++
+			}
 			continue
 		}
 		entry := index[key]
 		entry.TotalEvents++
+		switch name {
+		case "api.started":
+			entry.APIStarts++
+		case "api.completed", "api.error":
+			entry.APIOutcomes++
+		}
+		if getString(obj, "session_id") != "" {
+			entry.SessionEvents++
+		}
+		if tool {
+			entry.ToolEvents++
+		}
 		if name == "tool.completed" || name == "post_tool_call" {
 			entry.ToolCompletions++
 		}
